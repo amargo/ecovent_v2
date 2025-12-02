@@ -45,13 +45,34 @@ class VentoHub:
         self.fan = None
         self.name = name
 
-    async def authenticate(self, password: str) -> bool:
+    def authenticate(self, password: str) -> bool:
         """Authenticate."""
+        _LOGGER.debug(
+            "Authenticating Vento fan at %s:%s with device_id=%s",
+            self.host,
+            self.port,
+            self.fan_id,
+        )
         self.fan = Fan(self.host, password, self.fan_id, self.name, self.port)
-        self.fan.init_device()
+        init_ok = self.fan.init_device()
         self.fan_id = self.fan.id
         self.name = self.name + " " + self.fan_id
-        return self.fan.id != "DEFAULT_DEVICEID"
+        if not init_ok or self.fan_id == "DEFAULT_DEVICEID":
+            _LOGGER.error(
+                "Authentication failed for Vento fan at %s:%s (device_id=%s)",
+                self.host,
+                self.port,
+                self.fan_id,
+            )
+            return False
+        _LOGGER.info(
+            "Authenticated Vento fan %s with id %s at %s:%s",
+            self.name,
+            self.fan_id,
+            self.host,
+            self.port,
+        )
+        return True
 
 
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
@@ -70,7 +91,36 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         data[CONF_IP_ADDRESS], data[CONF_PORT], data[CONF_DEVICE_ID], data[CONF_NAME]
     )
 
-    if not await hub.authenticate(data[CONF_PASSWORD]):
+    _LOGGER.debug(
+        "Validating EcoVent_v2 config for host=%s, port=%s, device_id=%s, name=%s",
+        data[CONF_IP_ADDRESS],
+        data[CONF_PORT],
+        data[CONF_DEVICE_ID],
+        data[CONF_NAME],
+    )
+
+    try:
+        authenticated = await hass.async_add_executor_job(
+            hub.authenticate,
+            data[CONF_PASSWORD],
+        )
+    except OSError as err:
+        _LOGGER.error(
+            "Error connecting to Vento fan at %s:%s during validation: %s",
+            data[CONF_IP_ADDRESS],
+            data[CONF_PORT],
+            err,
+        )
+        raise CannotConnect from err
+    except Exception as err:  # pylint: disable=broad-except
+        _LOGGER.exception(
+            "Unexpected error while validating Vento fan at %s:%s",
+            data[CONF_IP_ADDRESS],
+            data[CONF_PORT],
+        )
+        raise CannotConnect from err
+
+    if not authenticated:
         raise InvalidAuth
 
     # If you cannot connect:
@@ -93,6 +143,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             "<broadcast>", "1111", "DEFAULT_DEVICEID", "Vento Express", 4000
         )
 
+    def _probe_ip(self, ip, user_input, unique_ids):
+        """Probe a single IP for a Vento fan.
+
+        This runs in an executor and must not use async APIs.
+        """
+        self._fan.host = ip
+        self._fan.id = user_input[CONF_DEVICE_ID]
+        self._fan.password = user_input[CONF_PASSWORD]
+        self._fan.name = user_input[CONF_NAME]
+        self._fan.port = user_input[CONF_PORT]
+        self._fan.init_device()
+        if self._fan.id not in unique_ids:
+            return True, self._fan.id
+        return False, self._fan.id
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -107,27 +172,49 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         try:
             if user_input[CONF_IP_ADDRESS] == "<broadcast>":
                 ip = None
-                ips = self._fan.search_devices("0.0.0.0")
+                _LOGGER.debug("Starting broadcast search for Vento fans")
+                ips = await self.hass.async_add_executor_job(
+                    self._fan.search_devices,
+                    "0.0.0.0",
+                )
                 # ips = ["10.94.0.105", "10.94.0.106", "10.94.0.107", "10.94.0.108"]
+                if not ips:
+                    _LOGGER.error("No Vento fans found via broadcast discovery")
+                    raise NoDevicesFound
                 unique_ids = []
                 for entry in self._async_current_entries(include_ignore=True):
                     unique_ids.append(entry.unique_id)
+                _LOGGER.debug("Discovered Vento fans at IPs: %s", ips)
                 for ip in ips:
-                    self._fan.host = ip
-                    self._fan.id = user_input[CONF_DEVICE_ID]
-                    self._fan.password = user_input[CONF_PASSWORD]
-                    self._fan.name = user_input[CONF_NAME]
-                    self._fan.port = user_input[CONF_PORT]
-                    self._fan.init_device()
-                    if self._fan.id not in unique_ids:
+                    _LOGGER.debug("Probing Vento fan at %s", ip)
+                    success, fan_id = await self.hass.async_add_executor_job(
+                        self._probe_ip,
+                        ip,
+                        user_input,
+                        unique_ids,
+                    )
+                    if success:
                         user_input[CONF_IP_ADDRESS] = ip
+                        _LOGGER.info(
+                            "Selected Vento fan at %s with id %s for configuration",
+                            ip,
+                            fan_id,
+                        )
                         break
                 if user_input[CONF_IP_ADDRESS] == "<broadcast>":
-                    raise CannotConnect
+                    _LOGGER.error(
+                        "All discovered Vento fans are already configured: %s",
+                        unique_ids,
+                    )
+                    raise AllDevicesConfigured
 
             info = await validate_input(self.hass, user_input)
             await self.async_set_unique_id(info["id"])
             self._abort_if_unique_id_configured()
+        except NoDevicesFound:
+            errors["base"] = "no_devices_found"
+        except AllDevicesConfigured:
+            errors["base"] = "all_devices_configured"
         except CannotConnect:
             errors["base"] = "cannot_connect"
         except InvalidAuth:
@@ -149,3 +236,11 @@ class CannotConnect(exceptions.HomeAssistantError):
 
 class InvalidAuth(exceptions.HomeAssistantError):
     """Error to indicate there is invalid auth."""
+
+
+class NoDevicesFound(exceptions.HomeAssistantError):
+    """Error to indicate no devices were found during broadcast discovery."""
+
+
+class AllDevicesConfigured(exceptions.HomeAssistantError):
+    """Error to indicate all discovered devices are already configured."""
