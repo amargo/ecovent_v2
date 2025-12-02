@@ -22,6 +22,104 @@ Home Assistant Integration. Integration for newest Fans with api version 2
   - "forward" means 'ventilation' airflow
   - "reverse" means 'air_supply' airflow
 
+# Installation
+
+## HACS (recommended)
+
+1. In Home Assistant, install and open **HACS**.
+2. Go to **Integrations** → menu (⋮) → **Custom repositories**.
+3. Add this repository URL as a **Custom repository** with type **Integration**.
+4. Find **EcoVent VENTO Expert V.2** in HACS and install it.
+5. Restart Home Assistant.
+
+## Manual installation
+
+1. Copy the `custom_components/ecovent_v2` folder from this repository into your Home Assistant `config/custom_components` directory so that you end up with:
+
+   - `<config>/custom_components/ecovent_v2/__init__.py`
+   - `<config>/custom_components/ecovent_v2/manifest.json`
+   - etc.
+
+2. Restart Home Assistant.
+
+# Configuration
+
+The integration is configured entirely from the Home Assistant UI:
+
+1. Go to **Settings → Devices & Services → Add integration**.
+2. Search for **EcoVent VENTO Expert V.2** (or `ecovent_v2`).
+3. Fill in the fields:
+
+   - **Host (ip_address)**
+     - Either the **IP address** of the fan, e.g. `192.168.1.42`, or the special value `<broadcast>` (see below).
+   - **Port**
+     - Defaults to `4000`. Only change this if you changed the fan's UDP port.
+   - **Password**
+     - Device password. The default factory password is usually `1111` unless you changed it in the fan's settings.
+   - **Device ID**
+     - Internal device identifier used by the fan. The default is `DEFAULT_DEVICEID`.
+     - For most setups you can leave the default. If you have multiple fans, you can use different IDs to distinguish them.
+   - **Name**
+     - Friendly name for the device in Home Assistant. This will be used for the device and entity names.
+
+## Broadcast discovery (`<broadcast>`)
+
+If you set **Host** to `<broadcast>`, the integration will try to **discover fans automatically** on your network:
+
+- The integration sends a UDP broadcast and listens for replies from EcoVent V2 fans.
+- All discovered devices are checked against existing config entries to avoid duplicates.
+- The first **not yet configured** fan is selected automatically and its IP address is stored in the config entry.
+
+Limitations:
+
+- This is **not full Home Assistant auto-discovery**, but a simple network scan that works on most flat home networks.
+- Broadcast may not work across VLANs/subnets or if your router blocks broadcasts.
+- If no devices are found, the config flow will show a specific error (see Troubleshooting below).
+
+# Troubleshooting
+
+## Config flow errors
+
+During configuration from the UI you may see these errors:
+
+- **cannot_connect**
+  - Home Assistant could not reach the fan at the configured IP/port.
+  - Check that:
+    - The IP address is correct and still assigned to the fan (DHCP may change it).
+    - The fan is powered on and connected to the same network as Home Assistant.
+    - The UDP port is `4000` (or matches your custom configuration).
+
+- **invalid_auth**
+  - The fan responded, but the password or device ID is not accepted.
+  - Verify the password in the fan's settings (default is usually `1111`).
+  - If you changed the device ID manually, make sure it matches the fan's configuration.
+
+- **no_devices_found** (only when using `<broadcast>` as Host)
+  - No EcoVent V2 devices replied to the broadcast discovery.
+  - Check that:
+    - At least one fan is powered on.
+    - Your network allows UDP broadcast from Home Assistant to the fan's network.
+    - Home Assistant and the fan(s) are on the same subnet/VLAN.
+
+- **all_devices_configured** (only when using `<broadcast>` as Host)
+  - Broadcast discovery found only devices that are already configured.
+  - If you want to reconfigure a fan, remove the old config entry first or use a direct IP address instead of `<broadcast>`.
+
+## Runtime errors / entities not updating
+
+If the integration sets up correctly but entities stop updating, check the Home Assistant log for messages like:
+
+- `Could not detect Vento fan ID at <ip>:<port> (configured device_id=...)`
+- `Error communicating with Vento fan: ...`
+
+In these cases:
+
+- Verify that the fan is still reachable at the configured IP address.
+- If your router changes IPs via DHCP, consider assigning a **static DHCP lease** to the fan.
+- Make sure the fan has power and Wi-Fi/WLAN signal is stable.
+
+After fixing the network/connection issue you can reload the integration from **Settings → Devices & Services → EcoVent VENTO Expert V.2 → Reload**.
+
 # Changelog
 version 0.0.5:
 * Added sensors:
